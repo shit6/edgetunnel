@@ -1,0 +1,64 @@
+name: Universal Upstream Sync (Auto-Detect)
+
+permissions:
+  contents: write
+  repository: read  # 新增权限，用于读取仓库的上游信息
+
+on:
+  # 高频定时检测（每5分钟检查一次上游更新，接近实时）
+  schedule:
+    - cron: "*/5 * * * *"
+  # 手动触发（方便测试）
+  workflow_dispatch:
+
+jobs:
+  auto-sync:
+    name: Auto Sync with Detected Upstream
+    runs-on: ubuntu-latest
+    if: ${{ github.event.repository.fork }}  # 仅在 Fork 仓库运行
+
+    steps:
+      # Step 1: 检出代码并获取仓库元数据
+      - name: Checkout code & Get repo info
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Step 2: 自动识别上游仓库地址（核心逻辑）
+      - name: Auto detect upstream repository
+        id: detect_upstream
+        run: |
+          # 获取当前仓库的原始上游 URL（GitHub API）
+          UPSTREAM_URL=$(curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}" | jq -r '.parent.full_name')
+          
+          # 验证是否识别到上游
+          if [ -z "$UPSTREAM_URL" ] || [ "$UPSTREAM_URL" = "null" ]; then
+            echo "Error: 未识别到上游仓库！请确认这是一个 Fork 仓库。"
+            exit 1
+          fi
+          
+          # 输出上游地址供后续步骤使用
+          echo "upstream_repo=$UPSTREAM_URL" >> $GITHUB_OUTPUT
+          echo "✅ 自动识别到上游仓库：$UPSTREAM_URL"
+
+      # Step 3: 执行同步（使用自动识别的上游地址）
+      - name: Sync with upstream
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
+        with:
+          upstream_sync_repo: ${{ steps.detect_upstream.outputs.upstream_repo }}
+          upstream_sync_branch: main
+          target_sync_branch: main
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
+          force_sync: true  # 强制同步，覆盖本地所有差异
+          test_mode: false
+
+      # Step 4: 同步失败提醒
+      - name: Sync failure notification
+        if: failure()
+        run: |
+          echo "❌ 同步失败！"
+          echo "当前仓库：${{ github.repository }}"
+          echo "识别到的上游仓库：${{ steps.detect_upstream.outputs.upstream_repo }}"
+          exit 1
